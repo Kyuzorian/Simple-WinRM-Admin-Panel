@@ -63,7 +63,6 @@ function Invoke-AsNetOnly {
 $script:ServerContexts             = [ordered]@{}
 $script:ActiveServerName           = $null
 $script:AuthToken                  = $null
-$script:AuthenticatedUserName      = $null
 $script:LastSessionCheckTimestamps = @{}
 $script:LastSessionCheckResults    = @{}
 $script:LastRefreshTimestamps      = @{}
@@ -75,18 +74,15 @@ function New-ServerContext {
 }
 
 function Set-CoreCredential {
-    param([Microsoft.Win32.SafeHandles.SafeAccessTokenHandle]$Token, [string]$UserName)
+    param([Microsoft.Win32.SafeHandles.SafeAccessTokenHandle]$Token)
     if ($script:AuthToken -and -not $script:AuthToken.IsClosed) { $script:AuthToken.Dispose() }
     $script:AuthToken = $Token
-    $script:AuthenticatedUserName = $UserName
 }
 
 function Clear-CoreCredential {
     if ($script:AuthToken -and -not $script:AuthToken.IsClosed) { $script:AuthToken.Dispose() }
     $script:AuthToken = $null
-    $script:AuthenticatedUserName = $null
 }
-function Get-CoreUserName { $script:AuthenticatedUserName }
 function Get-ActiveServer { if ($script:ActiveServerName) { $script:ServerContexts[$script:ActiveServerName] } }
 function Get-ServerContext { param([string]$ServerName) $script:ServerContexts[$ServerName] }
 function Set-ActiveServer { param([string]$ServerName) $script:ActiveServerName = $ServerName }
@@ -247,7 +243,7 @@ function Restart-RemoteServer {
 }
 
 Export-ModuleMember -Function New-NetOnlyToken, Test-NetOnlyToken, Invoke-AsNetOnly, Split-DomainUser,
-    Set-CoreCredential, Clear-CoreCredential, Get-CoreUserName, Get-ActiveServer, Get-ServerContext,
+    Set-CoreCredential, Clear-CoreCredential, Get-ActiveServer, Get-ServerContext,
     Set-ActiveServer, Get-ServerNames, Remove-ServerContext, Test-RefreshCooldown, Test-ActiveSession,
     Connect-Server, Get-RemoteServices, Set-RemoteServiceState, Get-RemoteServiceStatus,
     Get-RemoteProcesses, Stop-RemoteProcess, Get-RemoteDisks, Test-RemoteRebootPending, Restart-RemoteServer

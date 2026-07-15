@@ -102,6 +102,18 @@ function Set-ButtonEnabledState {
     $Button.Cursor = if ($IsEnabled) { 'Hand' } else { 'Default' }
     $Button.Enabled = $IsEnabled
 }
+
+function Register-SearchFilter {
+    param([System.Windows.Forms.TextBox]$TextBox, [scriptblock]$GetSource, [scriptblock]$SetRows, [string[]]$MatchFields)
+    $TextBox.Add_TextChanged({
+        $SearchTerm = $TextBox.Text.Trim()
+        $CurrentServer = Get-ActiveServer
+        if (-not $CurrentServer) { return }
+        $Source = & $GetSource $CurrentServer
+        if ($SearchTerm) { $Source = $Source | Where-Object { $Item = $_; @($MatchFields | Where-Object { $Item.$_ -like "*$SearchTerm*" }).Count -gt 0 } }
+        & $SetRows $Source
+    }.GetNewClosure())
+}
 #endregion
 
 function Show-AdminPanel {
@@ -228,6 +240,12 @@ function Add-Log {
     while ($ActivityLogListBox.Items.Count -gt 500) { $ActivityLogListBox.Items.RemoveAt(0) }
     $ActivityLogListBox.TopIndex = $ActivityLogListBox.Items.Count - 1
 }
+
+function Set-FailureStatus {
+    param([System.Windows.Forms.Label]$Label, [string]$LogMessage, $ErrorRecord)
+    if ($Label) { $Label.ForeColor = $Theme.ErrorColor; $Label.Text = "Failed: $($ErrorRecord.Exception.Message)" }
+    Add-Log "$LogMessage`: $($ErrorRecord.Exception.Message)" 'Fail'
+}
 #endregion
 
 #region LoginStatus
@@ -300,19 +318,11 @@ function Update-ProcessList {
         $LabelProcessStatus.Text = "Loaded $($Processes.Count) processes."
         Add-Log "Loaded $($Processes.Count) processes from $($CurrentServer.Name)" 'Success'
     } catch {
-        $LabelProcessStatus.ForeColor = $Theme.ErrorColor
-        $LabelProcessStatus.Text = "Failed: $($_.Exception.Message)"
-        Add-Log "Failed to load processes: $($_.Exception.Message)" 'Fail'
+        Set-FailureStatus -Label $LabelProcessStatus -LogMessage 'Failed to load processes' -ErrorRecord $_
     }
 }
 
-$TextBoxProcessSearch.Add_TextChanged({
-    $SearchTerm = $TextBoxProcessSearch.Text.Trim()
-    $CurrentServer = Get-ActiveServer
-    if (-not $CurrentServer) { return }
-    if (-not $SearchTerm) { Set-ProcessGridRows $CurrentServer.Processes; return }
-    Set-ProcessGridRows ($CurrentServer.Processes | Where-Object { $_.Name -like "*$SearchTerm*" })
-})
+Register-SearchFilter -TextBox $TextBoxProcessSearch -GetSource { param($s) $s.Processes } -SetRows { param($r) Set-ProcessGridRows $r } -MatchFields @('Name')
 
 $ButtonRefreshProcesses.Add_Click({ Invoke-Refresh -Button $ButtonRefreshProcesses -CooldownKey 'Processes' -Action { Update-ProcessList } })
 $ButtonEndProcess.Add_Click({
@@ -330,9 +340,7 @@ $ButtonEndProcess.Add_Click({
         $LabelProcessStatus.Text = "Ended: $ProcessName ($ProcessId)"
         Add-Log "Ended process $ProcessName ($ProcessId)" 'Success'
     } catch {
-        $LabelProcessStatus.ForeColor = $Theme.ErrorColor
-        $LabelProcessStatus.Text = "Failed: $($_.Exception.Message)"
-        Add-Log "Failed to end $ProcessName`: $($_.Exception.Message)" 'Fail'
+        Set-FailureStatus -Label $LabelProcessStatus -LogMessage "Failed to end $ProcessName" -ErrorRecord $_
     }
     Update-ProcessList
 })
@@ -394,7 +402,7 @@ function Update-DiskList {
         $DiskGrid.ResumeLayout()
         Add-Log "Loaded disk info from $($CurrentServer.Name)" 'Success'
     } catch {
-        Add-Log "Failed to load disks: $($_.Exception.Message)" 'Fail'
+        Set-FailureStatus -LogMessage 'Failed to load disks' -ErrorRecord $_
     }
 }
 
@@ -428,14 +436,19 @@ function Set-RebootVisible {
     $LabelRebootValue.Visible = $Visible
 }
 
+function Set-RebootLabelState {
+    param([bool]$Pending)
+    $LabelRebootValue.Text = if ($Pending) { 'Yes' } else { 'No' }
+    $LabelRebootValue.ForeColor = if ($Pending) { $Theme.ErrorColor } else { $Theme.SuccessColor }
+}
+
 function Update-RebootLabel {
     param([switch]$Force)
     $CurrentServer = Get-ActiveServer
     if (-not (Test-ActiveSession)) { if (-not $script:RestartTimer.Enabled) { Set-RebootVisible $false }; return }
     if (-not $Force -and $null -ne $CurrentServer.RebootPending) {
         Set-RebootVisible $true
-        if ($CurrentServer.RebootPending) { $LabelRebootValue.Text = 'Yes'; $LabelRebootValue.ForeColor = $Theme.ErrorColor }
-        else { $LabelRebootValue.Text = 'No'; $LabelRebootValue.ForeColor = $Theme.SuccessColor }
+        Set-RebootLabelState $CurrentServer.RebootPending
         return
     }
     Set-RebootVisible $true
@@ -444,8 +457,7 @@ function Update-RebootLabel {
     try {
         $RebootPending = Test-RemoteRebootPending -ServerContext $CurrentServer
         $CurrentServer.RebootPending = $RebootPending
-        if ($RebootPending) { $LabelRebootValue.Text = 'Yes'; $LabelRebootValue.ForeColor = $Theme.ErrorColor }
-        else { $LabelRebootValue.Text = 'No'; $LabelRebootValue.ForeColor = $Theme.SuccessColor }
+        Set-RebootLabelState $RebootPending
     } catch {
         $CurrentServer.RebootPending = $null
         $LabelRebootValue.Text = 'Unknown'
@@ -454,6 +466,7 @@ function Update-RebootLabel {
 }
 
 $script:SuppressServerListEvent = $false
+$script:GuiUserName = $null
 
 function Update-ServerList {
     $script:SuppressServerListEvent = $true
@@ -470,7 +483,7 @@ function Update-ServerList {
 
 function Update-Sidebar {
     $HasServers = @(Get-ServerNames).Count -gt 0
-    $IsAuthenticated = [bool](Get-CoreUserName)
+    $IsAuthenticated = [bool]$script:GuiUserName
     $IsConnected = Test-ActiveSession
     $IsRestarting = $script:RestartTimer.Enabled
     Update-ServerList
@@ -487,7 +500,7 @@ function Update-Sidebar {
     $ShowLogin = -not $IsAuthenticated
     foreach ($LoginControl in @($LabelUser,$TextBoxUser,$LabelPass,$TextBoxPass,$ButtonLogin)) { $LoginControl.Visible = $ShowLogin }
     $LabelSignedInAs.Visible = $IsAuthenticated
-    if ($IsAuthenticated) { $LabelSignedInAs.Text = "Signed in as $(Get-CoreUserName)" }
+    if ($IsAuthenticated) { $LabelSignedInAs.Text = "Signed in as $script:GuiUserName" }
     if ($IsConnected) { Update-RebootLabel } elseif (-not $IsRestarting) { Set-RebootVisible $false }
     $LabelLoginStatus.Visible = -not $IsAuthenticated
 }
@@ -497,7 +510,7 @@ function Update-Sidebar {
 function Connect-AndTrack {
     param([string]$ServerName)
     $ServerContext = Connect-Server -ServerName $ServerName
-    Add-Log "Connected to $ServerName as $(Get-CoreUserName) via WinRM" 'Success'
+    Add-Log "Connected to $ServerName as $script:GuiUserName via WinRM" 'Success'
     Update-Sidebar
     Show-Panel -Panel $PanelServices
     Update-ServiceList
@@ -526,7 +539,8 @@ $ButtonLogin.Add_Click({
             $LogonToken.Dispose()
             throw 'Invalid credentials'
         }
-        Set-CoreCredential -Token $LogonToken -UserName $UserNameInput
+        Set-CoreCredential -Token $LogonToken
+        $script:GuiUserName = $UserNameInput
         Add-Log "Signed in as $UserNameInput" 'Success'
         $LabelLoginStatus.Text = ''
         $TextBoxUser.Text = ''
@@ -576,6 +590,7 @@ $ButtonSignOut.Add_Click({
     if ($ConfirmResult -ne [DialogResult]::Yes) { return }
     foreach ($ServerName in Get-ServerNames) { Remove-ServerContext -ServerName $ServerName }
     Clear-CoreCredential
+    $script:GuiUserName = $null
     $TextBoxUser.Text = ''; $TextBoxPass.Text = ''
     Add-Log 'Signed out'
     Update-Sidebar
@@ -623,9 +638,7 @@ function Update-ServiceList {
         $LabelServiceStatus.Text = "Loaded $($SortedServices.Count) services."
         Add-Log "Loaded $($SortedServices.Count) services from $($CurrentServer.Name)" 'Success'
     } catch {
-        $LabelServiceStatus.ForeColor = $Theme.ErrorColor
-        $LabelServiceStatus.Text = "Failed: $($_.Exception.Message)"
-        Add-Log "Failed to load services: $($_.Exception.Message)" 'Fail'
+        Set-FailureStatus -Label $LabelServiceStatus -LogMessage 'Failed to load services' -ErrorRecord $_
     }
 }
 
@@ -645,14 +658,7 @@ function Set-ServiceGridRows {
     $ServiceGrid.ResumeLayout()
 }
 
-$TextBoxServiceSearch.Add_TextChanged({
-    $SearchTerm = $TextBoxServiceSearch.Text.Trim()
-    $CurrentServer = Get-ActiveServer
-    if (-not $CurrentServer) { return }
-    if (-not $SearchTerm) { Set-ServiceGridRows $CurrentServer.Services; return }
-    $FilteredServices = $CurrentServer.Services | Where-Object { $_.Name -like "*$SearchTerm*" -or $_.DisplayName -like "*$SearchTerm*" }
-    Set-ServiceGridRows $FilteredServices
-})
+Register-SearchFilter -TextBox $TextBoxServiceSearch -GetSource { param($s) $s.Services } -SetRows { param($r) Set-ServiceGridRows $r } -MatchFields @('Name','DisplayName')
 
 $ButtonRefreshServices.Add_Click({ Invoke-Refresh -Button $ButtonRefreshServices -CooldownKey 'Services' -Action { Update-ServiceList } })
 
@@ -711,9 +717,7 @@ function Invoke-ServiceAction {
         $LabelServiceStatus.ForeColor = $Theme.SuccessColor
         Add-Log "$ServiceAction succeeded: $ServiceName" 'Success'
     } catch {
-        $LabelServiceStatus.ForeColor = $Theme.ErrorColor
-        $LabelServiceStatus.Text = "Failed: $($_.Exception.Message)"
-        Add-Log "$ServiceAction failed on $ServiceName`: $($_.Exception.Message)" 'Fail'
+        Set-FailureStatus -Label $LabelServiceStatus -LogMessage "$ServiceAction failed on $ServiceName" -ErrorRecord $_
     }
     Update-ServiceList
 }
@@ -776,9 +780,7 @@ $ButtonDoRestart.Add_Click({
         $script:RestartTimer.Start()
         Update-Sidebar
     } catch {
-        $LabelRestartStatus.ForeColor = $Theme.ErrorColor
-        $LabelRestartStatus.Text = "Failed: $($_.Exception.Message)"
-        Add-Log "Restart failed on $($script:RestartTargetServerName): $($_.Exception.Message)" 'Fail'
+        Set-FailureStatus -Label $LabelRestartStatus -LogMessage "Restart failed on $($script:RestartTargetServerName)" -ErrorRecord $_
         $ButtonDoRestart.Enabled = $true
     }
 })
